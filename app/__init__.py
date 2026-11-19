@@ -8,6 +8,9 @@ from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
 
 from app.config import Settings, parse_cors_origins
+from app.routes.auth_routes import auth_bp
+from app.routes.catalog_routes import catalog_bp
+from app.routes.factura_routes import factura_bp
 from app.routes.health_routes import health_bp
 
 _ERROR_CATALOG: dict[int, tuple[str, str]] = {
@@ -93,5 +96,8 @@ def create_app(
 
     _register_error_handlers(app)
     app.register_blueprint(health_bp)
+    app.register_blueprint(auth_bp)
+    app.register_blueprint(catalog_bp)
+    app.register_blueprint(factura_bp)
 
     return app

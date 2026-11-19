@@ -3,9 +3,28 @@ from __future__ import annotations
 from collections.abc import Callable
 from flask import Blueprint, current_app, jsonify
 
+from app.repositories.dynamo_repo import check_dynamo_connection
+from app.repositories.oracle_pool import check_oracle_connection
+
 health_bp = Blueprint("health", __name__)
 
 _OPTIONAL_DEPENDENCIES = ("oracle", "dynamodb")
+
+
+def _resolve_health_checks() -> dict[str, Callable[[], bool]]:
+    """Return configured health checks or default Oracle/DynamoDB probes."""
+    configured = current_app.config.get("HEALTH_CHECKS")
+    if configured is not None:
+        return configured
+
+    if current_app.config.get("TESTING"):
+        return {}
+
+    config = current_app.config
+    return {
+        "oracle": lambda: check_oracle_connection(config),
+        "dynamodb": lambda: check_dynamo_connection(config),
+    }
 
 
 def _run_dependency_check(name: str, check_fn: Callable[[], bool] | None) -> str:
@@ -22,10 +41,8 @@ def _run_dependency_check(name: str, check_fn: Callable[[], bool] | None) -> str
 
 @health_bp.get("/health")
 def health_check():
-    """Return Flask health status and optional Oracle/DynamoDB dependency checks."""
-    configured_checks: dict[str, Callable[[], bool]] = (
-        current_app.config.get("HEALTH_CHECKS") or {}
-    )
+    """Return Flask health status and Oracle/DynamoDB dependency checks."""
+    configured_checks = _resolve_health_checks()
 
     checks: dict[str, str] = {"flask": "ok"}
     has_failure = False
