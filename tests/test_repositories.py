@@ -82,6 +82,16 @@ def test_sp_2_sincronizar_usuario_cognito_callproc_order():
     assert res == {"id_usuario": 7, "rol": "ADMIN_ACADEMICO", "activo": 1}
 
 
+def _make_mock_conn_with_ref_cursors(ref_cursors: list):
+    call_cursor = MagicMock()
+    call_cursor.__enter__ = MagicMock(return_value=call_cursor)
+    call_cursor.__exit__ = MagicMock(return_value=False)
+
+    conn = MagicMock()
+    conn.cursor.side_effect = [*ref_cursors, call_cursor]
+    return conn, call_cursor
+
+
 def test_sp_3_listar_catalogos_sat_callproc_and_cursors():
     cur_formas = _make_ref_cursor(["CLAVE", "DESCRIPCION"], [("03", "Transferencia")])
     cur_metodos = _make_ref_cursor(["CLAVE", "DESCRIPCION"], [("PUE", "Una exhibición")])
@@ -91,12 +101,14 @@ def test_sp_3_listar_catalogos_sat_callproc_and_cursors():
     )
     cur_usos = _make_ref_cursor(["CLAVE", "DESCRIPCION"], [("G03", "Gastos en general")])
 
-    conn, cursor = _make_mock_conn([cur_formas, cur_metodos, cur_regimenes, cur_usos])
+    conn, cursor = _make_mock_conn_with_ref_cursors(
+        [cur_formas, cur_metodos, cur_regimenes, cur_usos]
+    )
     res = sp_listar_catalogos_sat(conn)
 
     proc_name, params = cursor.callproc.call_args.args
     assert proc_name == "SP_LISTAR_CATALOGOS_SAT"
-    assert len(params) == 4
+    assert params == [cur_formas, cur_metodos, cur_regimenes, cur_usos]
     assert res["formasPago"] == [{"clave": "03", "descripcion": "Transferencia"}]
     assert res["metodosPago"] == [{"clave": "PUE", "descripcion": "Una exhibición"}]
     assert res["regimenesFiscales"] == [
@@ -211,13 +223,12 @@ def test_sp_9_cancelar_factura_callproc_and_domain_errors():
 def test_sp_10_consultar_factura_completa_callproc_and_cursors():
     cur_cab = _make_ref_cursor(["ID_FACTURA", "ESTADO"], [(15, "TIMBRADA")])
     cur_det = _make_ref_cursor(["ID_DETALLE", "SKU"], [(1, "SRV-001")])
-    conn, cursor = _make_mock_conn([cur_cab, cur_det])
+    conn, cursor = _make_mock_conn_with_ref_cursors([cur_cab, cur_det])
 
     res = sp_consultar_factura_completa(conn, 15)
     proc_name, params = cursor.callproc.call_args.args
     assert proc_name == "SP_CONSULTAR_FACTURA_COMPLETA"
-    assert params[0] == 15
-    assert len(params) == 3
+    assert params == [15, cur_cab, cur_det]
     assert res == {
         "cabecera": {"id_factura": 15, "estado": "TIMBRADA"},
         "detalles": [{"id_detalle": 1, "sku": "SRV-001"}],
@@ -225,7 +236,7 @@ def test_sp_10_consultar_factura_completa_callproc_and_cursors():
 
     cur_cab_empty = _make_ref_cursor(["ID_FACTURA"], [])
     cur_det_empty = _make_ref_cursor(["ID_DETALLE"], [])
-    conn_empty, _ = _make_mock_conn([cur_cab_empty, cur_det_empty])
+    conn_empty, _ = _make_mock_conn_with_ref_cursors([cur_cab_empty, cur_det_empty])
     assert sp_consultar_factura_completa(conn_empty, 9999) is None
 
 
@@ -281,12 +292,37 @@ def test_oracle_pool_ping_interval_and_discards_unhealthy_first_click_connection
         pool_kwargs = create_pool_mock.call_args.kwargs
         assert pool_kwargs["ping_interval"] == 0
         assert pool_kwargs["getmode"] == oracledb.POOL_GETMODE_TIMEDWAIT
-        assert pool_kwargs["wait_timeout"] == 5000
+        assert pool_kwargs["wait_timeout"] == 15000
         assert pool_kwargs["max_lifetime_session"] == 1800
+        assert pool_kwargs["disable_oob"] is True
         mock_pool.drop.assert_called_once_with(stale_conn)
         assert healthy_conn.call_timeout == 15000
         healthy_conn.commit.assert_called_once()
         healthy_conn.close.assert_called_once()
+
+    close_oracle_pool()
+
+
+def test_oracle_transaction_drops_disconnected_connection_on_dpy_1001():
+    close_oracle_pool()
+    mock_conn = MagicMock()
+    mock_conn.is_healthy.return_value = True
+    mock_conn.rollback.side_effect = RuntimeError("DPY-1001: not connected to database")
+    mock_pool = MagicMock()
+    mock_pool.acquire.return_value = mock_conn
+
+    with patch("app.repositories.oracle_pool.oracledb.create_pool", return_value=mock_pool):
+        cfg = {
+            "ORACLE_USER": "admin",
+            "ORACLE_PASSWORD": "secret",
+            "ORACLE_DSN": "host:1521/ORCL",
+        }
+        with pytest.raises(RuntimeError, match="DPY-4011"):
+            with oracle_transaction(config=cfg):
+                raise RuntimeError("DPY-4011: the database or network closed the connection")
+
+        mock_pool.drop.assert_called_once_with(mock_conn)
+        mock_conn.close.assert_not_called()
 
     close_oracle_pool()
 

@@ -111,7 +111,7 @@ class OraclePoolManager:
                 max=10,
                 increment=1,
                 getmode=oracledb.POOL_GETMODE_TIMEDWAIT,
-                wait_timeout=5000,
+                wait_timeout=15000,
                 timeout=300,
                 max_lifetime_session=1800,
                 ping_interval=0,
@@ -120,6 +120,7 @@ class OraclePoolManager:
                 retry_count=2,
                 retry_delay=1,
                 expire_time=2,
+                disable_oob=True,
             )
             return self._pool
 
@@ -183,28 +184,62 @@ def _acquire_healthy_connection(pool: Any) -> Any:
     return pool.acquire()
 
 
+def _drop_broken_connection(pool: Any, conn: Any) -> None:
+    """Safely discard a disconnected Oracle connection from the pool."""
+    drop_fn = getattr(pool, "drop", None)
+    if callable(drop_fn):
+        try:
+            drop_fn(conn)
+            return
+        except Exception:
+            pass
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
 @contextmanager
 def oracle_transaction(config: Mapping[str, Any] | None = None) -> Iterator[Any]:
     """Acquire a pooled Oracle connection with automatic commit or rollback."""
     pool = get_oracle_pool(config=config)
     conn = _acquire_healthy_connection(pool)
+    dropped = False
     try:
         yield conn
         conn.commit()
     except Exception as exc:
-        try:
-            conn.rollback()
-        except Exception:
-            logger.exception("Failed to rollback Oracle transaction")
+        is_healthy_fn = getattr(conn, "is_healthy", None)
+        if callable(is_healthy_fn) and is_healthy_fn() is False:
+            logger.warning("Dropping disconnected Oracle connection instead of rollback")
+            _drop_broken_connection(pool, conn)
+            dropped = True
+        else:
+            try:
+                conn.rollback()
+            except Exception as rollback_exc:
+                if "DPY-1001" in str(rollback_exc) or "DPY-4011" in str(rollback_exc):
+                    logger.warning(
+                        "Oracle connection already disconnected during rollback (%s); dropping from pool",
+                        rollback_exc,
+                    )
+                else:
+                    logger.warning(
+                        "Oracle rollback failed (%s); dropping connection from pool",
+                        rollback_exc,
+                    )
+                _drop_broken_connection(pool, conn)
+                dropped = True
         translated = translate_oracle_error(exc)
         if translated is not exc:
             raise translated from exc
         raise
     finally:
-        try:
-            conn.close()
-        except Exception:
-            logger.exception("Failed to release Oracle connection back to pool")
+        if not dropped:
+            try:
+                conn.close()
+            except Exception:
+                logger.exception("Failed to release Oracle connection back to pool")
 
 
 def _fetch_ref_cursor(ref_cursor: Any) -> list[dict[str, Any]]:
@@ -268,23 +303,31 @@ def sp_sincronizar_usuario_cognito(
 
 def sp_listar_catalogos_sat(conn: Any) -> dict[str, list[dict[str, Any]]]:
     """3. SP_LISTAR_CATALOGOS_SAT(OUT cur_formas, cur_metodos, cur_regimenes, cur_usos)."""
-    with conn.cursor() as cursor:
-        p_cur_formas = cursor.var(oracledb.CURSOR)
-        p_cur_metodos = cursor.var(oracledb.CURSOR)
-        p_cur_regimenes = cursor.var(oracledb.CURSOR)
-        p_cur_usos = cursor.var(oracledb.CURSOR)
-
-        cursor.callproc(
-            "SP_LISTAR_CATALOGOS_SAT",
-            [p_cur_formas, p_cur_metodos, p_cur_regimenes, p_cur_usos],
-        )
-
+    cur_formas = conn.cursor()
+    cur_metodos = conn.cursor()
+    cur_regimenes = conn.cursor()
+    cur_usos = conn.cursor()
+    try:
+        with conn.cursor() as cursor:
+            cursor.callproc(
+                "SP_LISTAR_CATALOGOS_SAT",
+                [cur_formas, cur_metodos, cur_regimenes, cur_usos],
+            )
         return {
-            "formasPago": _fetch_ref_cursor(p_cur_formas.getvalue()),
-            "metodosPago": _fetch_ref_cursor(p_cur_metodos.getvalue()),
-            "regimenesFiscales": _fetch_ref_cursor(p_cur_regimenes.getvalue()),
-            "usosCfdi": _fetch_ref_cursor(p_cur_usos.getvalue()),
+            "formasPago": _fetch_ref_cursor(cur_formas),
+            "metodosPago": _fetch_ref_cursor(cur_metodos),
+            "regimenesFiscales": _fetch_ref_cursor(cur_regimenes),
+            "usosCfdi": _fetch_ref_cursor(cur_usos),
         }
+    except Exception:
+        for ref_cur in (cur_formas, cur_metodos, cur_regimenes, cur_usos):
+            close_fn = getattr(ref_cur, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+        raise
 
 
 def sp_upsert_cliente(
@@ -431,16 +474,17 @@ def sp_consultar_factura_completa(
     id_factura: int,
 ) -> dict[str, Any] | None:
     """10. SP_CONSULTAR_FACTURA_COMPLETA(IN id_factura; OUT cur_cabecera, cur_detalles)."""
-    with conn.cursor() as cursor:
-        p_cur_cabecera = cursor.var(oracledb.CURSOR)
-        p_cur_detalles = cursor.var(oracledb.CURSOR)
-        cursor.callproc(
-            "SP_CONSULTAR_FACTURA_COMPLETA",
-            [id_factura, p_cur_cabecera, p_cur_detalles],
-        )
+    cur_cabecera = conn.cursor()
+    cur_detalles = conn.cursor()
+    try:
+        with conn.cursor() as cursor:
+            cursor.callproc(
+                "SP_CONSULTAR_FACTURA_COMPLETA",
+                [id_factura, cur_cabecera, cur_detalles],
+            )
 
-        cabecera_rows = _fetch_ref_cursor(p_cur_cabecera.getvalue())
-        detalles_rows = _fetch_ref_cursor(p_cur_detalles.getvalue())
+        cabecera_rows = _fetch_ref_cursor(cur_cabecera)
+        detalles_rows = _fetch_ref_cursor(cur_detalles)
 
         if not cabecera_rows:
             return None
@@ -449,6 +493,15 @@ def sp_consultar_factura_completa(
             "cabecera": cabecera_rows[0],
             "detalles": detalles_rows,
         }
+    except Exception:
+        for ref_cur in (cur_cabecera, cur_detalles):
+            close_fn = getattr(ref_cur, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+        raise
 
 
 def check_oracle_connection(config: Mapping[str, Any] | None = None) -> bool:
