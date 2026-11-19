@@ -1,5 +1,7 @@
 venv/
 .venv/
+.vscode/
+pyrightconfig.json
 __pycache__/
 *.py[cod]
 .env

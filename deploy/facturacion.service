@@ -7,7 +7,7 @@ After=network.target
 User=ubuntu
 WorkingDirectory=/home/ubuntu/billing-system-backend
 EnvironmentFile=/home/ubuntu/billing-system-backend/.env
-ExecStart=/home/ubuntu/billing-system-backend/venv/bin/gunicorn --workers 3 --bind 127.0.0.1:5000 --timeout 60 wsgi:app
+ExecStart=/home/ubuntu/billing-system-backend/venv/bin/gunicorn --workers 2 --threads 2 --timeout 60 -c /home/ubuntu/billing-system-backend/gunicorn.conf.py wsgi:app
 Restart=always
 RestartSec=3
 

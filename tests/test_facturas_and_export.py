@@ -430,3 +430,26 @@ def test_exportar_pdf_and_xml_upload_to_s3_and_audit(client, rsa_keys):
         # Invalid format -> 400
         resp_bad = client.get("/facturas/15/exportar?formato=docx", headers=headers)
         assert resp_bad.status_code == 400
+
+
+def test_seed_realistic_services_catalog_integrity_and_batch_write():
+    from scripts.seed_realistic_services import build_realistic_services, seed_dynamodb
+
+    items = build_realistic_services()
+    assert len(items) == 100
+    assert [item["id_service"] for item in items] == [f"SRV-{i:03d}" for i in range(1, 101)]
+    assert len({item["nombre_servicio"] for item in items}) == 100
+    assert all(isinstance(item["precio_unitario"], Decimal) for item in items)
+    assert all(len(item["caracteristicas"]) == 50 for item in items)
+
+    mock_batch = MagicMock()
+    mock_table = MagicMock()
+    mock_table.batch_writer.return_value.__enter__.return_value = mock_batch
+    mock_resource = MagicMock()
+    mock_resource.Table.return_value = mock_table
+
+    with patch("scripts.seed_realistic_services.boto3.resource", return_value=mock_resource):
+        seed_dynamodb(items=items, table_name="ListServices", region_name="us-east-1")
+
+    mock_table.batch_writer.assert_called_once_with(overwrite_by_pkeys=["id_service"])
+    assert mock_batch.put_item.call_count == 100

@@ -186,7 +186,7 @@ BEGIN
       INTO v_estado, p_folio, p_serie
       FROM facturas
      WHERE id_factura = p_id_factura
-       FOR UPDATE;
+       FOR UPDATE WAIT 5;
 
     IF v_estado <> 'PENDIENTE' THEN
         RAISE_APPLICATION_ERROR(-20001, 'Solo se pueden timbrar facturas en estado PENDIENTE. Estado actual: ' || v_estado);
@@ -202,6 +202,11 @@ BEGIN
 EXCEPTION
     WHEN NO_DATA_FOUND THEN
         RAISE_APPLICATION_ERROR(-20004, 'Factura no encontrada: ' || p_id_factura);
+    WHEN OTHERS THEN
+        IF SQLCODE IN (-54, -30006) THEN
+            RAISE_APPLICATION_ERROR(-20003, 'Factura bloqueada por otra transacción en curso: ' || p_id_factura);
+        END IF;
+        RAISE;
 END SP_TIMBRAR_FACTURA;
 /
 
@@ -217,7 +222,7 @@ BEGIN
     SELECT estado INTO v_estado
       FROM facturas
      WHERE id_factura = p_id_factura
-       FOR UPDATE;
+       FOR UPDATE WAIT 5;
 
     IF v_estado <> 'TIMBRADA' THEN
         RAISE_APPLICATION_ERROR(-20002, 'Solo se pueden cancelar facturas en estado TIMBRADA. Estado actual: ' || v_estado);
@@ -231,6 +236,11 @@ BEGIN
 EXCEPTION
     WHEN NO_DATA_FOUND THEN
         RAISE_APPLICATION_ERROR(-20004, 'Factura no encontrada: ' || p_id_factura);
+    WHEN OTHERS THEN
+        IF SQLCODE IN (-54, -30006) THEN
+            RAISE_APPLICATION_ERROR(-20003, 'Factura bloqueada por otra transacción en curso: ' || p_id_factura);
+        END IF;
+        RAISE;
 END SP_CANCELAR_FACTURA;
 /
 

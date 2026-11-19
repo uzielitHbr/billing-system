@@ -259,6 +259,45 @@ def test_oracle_transaction_commits_on_success_and_rollbacks_on_failure():
     close_oracle_pool()
 
 
+def test_oracle_pool_ping_interval_and_discards_unhealthy_first_click_connection():
+    close_oracle_pool()
+    stale_conn = MagicMock()
+    stale_conn.is_healthy.return_value = False
+    healthy_conn = MagicMock()
+    healthy_conn.is_healthy.return_value = True
+
+    mock_pool = MagicMock()
+    mock_pool.acquire.side_effect = [stale_conn, healthy_conn]
+
+    with patch("app.repositories.oracle_pool.oracledb.create_pool", return_value=mock_pool) as create_pool_mock:
+        cfg = {
+            "ORACLE_USER": "admin",
+            "ORACLE_PASSWORD": "secret",
+            "ORACLE_DSN": "host:1521/ORCL",
+        }
+        with oracle_transaction(config=cfg) as conn:
+            assert conn is healthy_conn
+
+        pool_kwargs = create_pool_mock.call_args.kwargs
+        assert pool_kwargs["ping_interval"] == 0
+        assert pool_kwargs["getmode"] == oracledb.POOL_GETMODE_TIMEDWAIT
+        assert pool_kwargs["wait_timeout"] == 5000
+        assert pool_kwargs["max_lifetime_session"] == 1800
+        mock_pool.drop.assert_called_once_with(stale_conn)
+        assert healthy_conn.call_timeout == 15000
+        healthy_conn.commit.assert_called_once()
+        healthy_conn.close.assert_called_once()
+
+    close_oracle_pool()
+
+
+def test_ora_lock_errors_translate_to_conflict():
+    conn_lock, cursor_lock = _make_mock_conn([None, None, None])
+    cursor_lock.callproc.side_effect = RuntimeError("ORA-30006: resource busy; acquire with WAIT timeout expired")
+    with pytest.raises(InvoiceStateConflictError):
+        sp_timbrar_factura(conn_lock, 15, "uuid")
+
+
 def test_check_oracle_connection_runs_select_1_from_dual():
     close_oracle_pool()
     mock_cursor = MagicMock()

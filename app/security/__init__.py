@@ -1,8 +1,12 @@
 from app.security.cognito_client import (
     CognitoAuthError,
+    CognitoValidationError,
     InvalidCredentialsError,
     PasswordChangeRequiredError,
+    RateLimitExceededError,
     authenticate_user,
+    confirm_forgot_password,
+    initiate_forgot_password,
 )
 from app.security.jwt_validator import (
     InactiveUserError,
@@ -15,9 +19,13 @@ from app.security.jwt_validator import (
 
 __all__ = [
     "CognitoAuthError",
+    "CognitoValidationError",
     "InvalidCredentialsError",
     "PasswordChangeRequiredError",
+    "RateLimitExceededError",
     "authenticate_user",
+    "initiate_forgot_password",
+    "confirm_forgot_password",
     "InactiveUserError",
     "JWTValidationError",
     "clear_jwk_client_cache",

@@ -7,6 +7,8 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from app.config import get_boto3_config
+
 
 class CognitoAuthError(Exception):
     """Base authentication error returned by Amazon Cognito."""
@@ -34,10 +36,44 @@ class PasswordChangeRequiredError(CognitoAuthError):
         super().__init__(message, status_code=403)
 
 
+class CognitoValidationError(CognitoAuthError):
+    """400 error for invalid verification codes, parameters, or password policy."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, status_code=400)
+
+
+class RateLimitExceededError(CognitoAuthError):
+    """429 error when Cognito rate limit is exceeded."""
+
+    def __init__(
+        self,
+        message: str = "Se excedió el límite de intentos. Intenta nuevamente más tarde.",
+    ) -> None:
+        super().__init__(message, status_code=429)
+
+
 def _read_setting(key: str, config: Mapping[str, Any] | None, default: str = "") -> str:
     if config and config.get(key):
         return str(config[key]).strip()
     return os.getenv(key, default).strip()
+
+
+def _get_idp_client(
+    config: Mapping[str, Any] | None = None,
+    client: Any | None = None,
+) -> tuple[Any, str]:
+    region = _read_setting("AWS_REGION", config, "us-east-1")
+    client_id = _read_setting("COGNITO_CLIENT_ID", config)
+    if not client_id:
+        raise RuntimeError("COGNITO_CLIENT_ID no configurado")
+
+    idp_client = client or boto3.client(
+        "cognito-idp",
+        region_name=region,
+        config=get_boto3_config(),
+    )
+    return idp_client, client_id
 
 
 def authenticate_user(
@@ -47,13 +83,7 @@ def authenticate_user(
     client: Any | None = None,
 ) -> dict[str, Any]:
     """Authenticate user with Amazon Cognito USER_PASSWORD_AUTH flow."""
-    region = _read_setting("AWS_REGION", config, "us-east-1")
-    client_id = _read_setting("COGNITO_CLIENT_ID", config)
-
-    if not client_id:
-        raise RuntimeError("COGNITO_CLIENT_ID no configurado")
-
-    idp_client = client or boto3.client("cognito-idp", region_name=region)
+    idp_client, client_id = _get_idp_client(config=config, client=client)
 
     try:
         response = idp_client.initiate_auth(
@@ -88,3 +118,69 @@ def authenticate_user(
         "id_token": str(id_token),
         "expires_in": int(auth_result.get("ExpiresIn", 3600)),
     }
+
+
+def initiate_forgot_password(
+    email: str,
+    config: Mapping[str, Any] | None = None,
+    client: Any | None = None,
+) -> None:
+    """Start Cognito forgot_password flow; suppresses UserNotFoundException (anti-enumeration)."""
+    idp_client, client_id = _get_idp_client(config=config, client=client)
+
+    try:
+        idp_client.forgot_password(
+            ClientId=client_id,
+            Username=email,
+        )
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code", "")
+        if error_code == "UserNotFoundException":
+            return
+        if error_code in ("LimitExceededException", "TooManyRequestsException"):
+            raise RateLimitExceededError() from exc
+        if error_code == "InvalidParameterException":
+            raise CognitoValidationError(
+                "No es posible restablecer la contraseña porque el correo electrónico no está verificado."
+            ) from exc
+        raise
+
+
+def confirm_forgot_password(
+    email: str,
+    code: str,
+    new_password: str,
+    config: Mapping[str, Any] | None = None,
+    client: Any | None = None,
+) -> None:
+    """Confirm Cognito password reset with verification code and new password."""
+    idp_client, client_id = _get_idp_client(config=config, client=client)
+
+    try:
+        idp_client.confirm_forgot_password(
+            ClientId=client_id,
+            Username=email,
+            ConfirmationCode=code,
+            Password=new_password,
+        )
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code", "")
+        if error_code == "CodeMismatchException":
+            raise CognitoValidationError(
+                "El código de verificación es incorrecto."
+            ) from exc
+        if error_code == "ExpiredCodeException":
+            raise CognitoValidationError(
+                "El código de verificación ha expirado. Solicita uno nuevo."
+            ) from exc
+        if error_code == "InvalidPasswordException":
+            raise CognitoValidationError(
+                "La nueva contraseña no cumple con la política de seguridad requerida."
+            ) from exc
+        if error_code in ("UserNotFoundException", "InvalidParameterException"):
+            raise CognitoValidationError(
+                "No fue posible confirmar el cambio de contraseña con los datos proporcionados."
+            ) from exc
+        if error_code in ("LimitExceededException", "TooManyRequestsException"):
+            raise RateLimitExceededError() from exc
+        raise

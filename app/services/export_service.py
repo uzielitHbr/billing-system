@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import os
+import time
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from io import BytesIO
@@ -12,10 +14,12 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from app.config import get_boto3_config
 from app.dtos.factura_dto import FacturaDetalleResponseDTO
 from app.repositories.oracle_pool import oracle_transaction, sp_registrar_bitacora
 from app.services.factura_service import obtener_factura
 
+logger = logging.getLogger(__name__)
 PRESIGNED_TTL_SECONDS = 300
 
 
@@ -241,8 +245,20 @@ def exportar_factura(
         raise RuntimeError("S3_BUCKET_COMPROBANTES no configurado")
 
     s3_key = f"facturas/{id_factura}/factura_{factura.serie}_{factura.folio}.{normalized_format}"
-    client = s3_client or boto3.client("s3", region_name=region)
+    client = s3_client or boto3.client(
+        "s3",
+        region_name=region,
+        config=get_boto3_config(),
+    )
 
+    t0 = time.monotonic()
+    logger.info(
+        "[exportar] id_factura=%s formato=%s step=put_object bucket=%s key=%s",
+        id_factura,
+        normalized_format,
+        bucket,
+        s3_key,
+    )
     client.put_object(
         Bucket=bucket,
         Key=s3_key,
@@ -265,6 +281,12 @@ def exportar_factura(
             ip_origen=client_ip,
             usuario=str(current_user["email"]),
         )
+    logger.info(
+        "[exportar] id_factura=%s formato=%s step=done elapsed_ms=%.1f",
+        id_factura,
+        normalized_format,
+        (time.monotonic() - t0) * 1000,
+    )
 
     return {
         "formato": normalized_format,

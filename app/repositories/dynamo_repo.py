@@ -10,6 +10,8 @@ from typing import Any
 
 import boto3
 
+from app.config import get_boto3_config
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CACHE_TTL_SECONDS = 60.0
@@ -45,7 +47,11 @@ class DynamoServiceRepository:
         if self._table is None:
             with self._lock:
                 if self._table is None:
-                    resource = boto3.resource("dynamodb", region_name=self.region_name)
+                    resource = boto3.resource(
+                        "dynamodb",
+                        region_name=self.region_name,
+                        config=get_boto3_config(),
+                    )
                     self._table = resource.Table(self.table_name)
         return self._table
 

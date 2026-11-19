@@ -28,3 +28,23 @@ class LoginResponseDTO(StrictDTO):
     token: str = Field(..., min_length=1)
     expiresIn: int = Field(..., ge=1)
     user: LoginUserDTO
+
+
+class ForgotPasswordRequestDTO(StrictDTO):
+    """Input schema for POST /auth/forgot-password."""
+
+    email: EmailStr
+
+
+class ConfirmForgotPasswordRequestDTO(StrictDTO):
+    """Input schema for POST /auth/confirm-forgot-password."""
+
+    email: EmailStr
+    code: str = Field(..., min_length=4, max_length=20)
+    newPassword: str = Field(..., min_length=8, max_length=128)
+
+
+class AuthMessageResponseDTO(StrictDTO):
+    """Output message schema for password recovery endpoints."""
+
+    mensaje: str

@@ -3,13 +3,24 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from app.dtos.auth_dto import LoginRequestDTO, LoginResponseDTO, LoginUserDTO
+from app.dtos.auth_dto import (
+    AuthMessageResponseDTO,
+    ConfirmForgotPasswordRequestDTO,
+    ForgotPasswordRequestDTO,
+    LoginRequestDTO,
+    LoginResponseDTO,
+    LoginUserDTO,
+)
 from app.repositories.oracle_pool import (
     oracle_transaction,
     sp_registrar_bitacora,
     sp_sincronizar_usuario_cognito,
 )
-from app.security.cognito_client import authenticate_user
+from app.security.cognito_client import (
+    authenticate_user,
+    confirm_forgot_password as cognito_confirm_forgot_password,
+    initiate_forgot_password as cognito_initiate_forgot_password,
+)
 from app.security.jwt_validator import InactiveUserError, validate_cognito_id_token
 
 
@@ -61,4 +72,34 @@ def login(
             name=name,
             role=user_sync["rol"],
         ),
+    )
+
+
+def forgot_password(
+    dto: ForgotPasswordRequestDTO,
+    config: Mapping[str, Any] | None = None,
+) -> AuthMessageResponseDTO:
+    """Initiate Cognito password recovery without leaking user existence."""
+    cognito_initiate_forgot_password(email=str(dto.email), config=config)
+    return AuthMessageResponseDTO(
+        mensaje=(
+            "Si el correo está registrado, recibirás un código de verificación "
+            "para restablecer tu contraseña."
+        )
+    )
+
+
+def confirm_forgot_password(
+    dto: ConfirmForgotPasswordRequestDTO,
+    config: Mapping[str, Any] | None = None,
+) -> AuthMessageResponseDTO:
+    """Confirm Cognito password reset with verification code and new password."""
+    cognito_confirm_forgot_password(
+        email=str(dto.email),
+        code=dto.code,
+        new_password=dto.newPassword,
+        config=config,
+    )
+    return AuthMessageResponseDTO(
+        mensaje="Contraseña actualizada correctamente. Ya puedes iniciar sesión."
     )

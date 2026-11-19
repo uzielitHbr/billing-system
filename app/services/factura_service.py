@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -36,6 +38,7 @@ from app.repositories.oracle_pool import (
     sp_upsert_cliente,
 )
 
+logger = logging.getLogger(__name__)
 IVA_RATE = Decimal("0.16")
 TWO_PLACES = Decimal("0.01")
 
@@ -297,11 +300,21 @@ def emitir_factura(
     config: Mapping[str, Any] | None = None,
 ) -> FacturaDetalleResponseDTO:
     """Stamp a PENDIENTE invoice with a generated UUIDv4 and return full detail."""
+    t0 = time.monotonic()
     fiscal_uuid = str(uuid.uuid4())
     user_email = str(current_user["email"])
+    logger.info(
+        "[emitir] id_factura=%s step=start usuario=%s uuid=%s",
+        id_factura,
+        user_email,
+        fiscal_uuid,
+    )
 
     with oracle_transaction(config=config) as conn:
+        logger.info("[emitir] id_factura=%s step=sp_timbrar_factura", id_factura)
         timbrado = sp_timbrar_factura(conn, id_factura=id_factura, uuid=fiscal_uuid)
+
+        logger.info("[emitir] id_factura=%s step=sp_registrar_bitacora", id_factura)
         sp_registrar_bitacora(
             conn,
             id_factura=id_factura,
@@ -313,12 +326,20 @@ def emitir_factura(
             ip_origen=client_ip,
             usuario=user_email,
         )
+
+        logger.info("[emitir] id_factura=%s step=sp_consultar_factura_completa", id_factura)
         raw = sp_consultar_factura_completa(conn, id_factura=id_factura)
 
     if raw is None:
         raise InvoiceNotFoundError("Factura no encontrada.", ora_code=20004)
 
-    return map_factura_to_dto(raw)
+    dto = map_factura_to_dto(raw)
+    logger.info(
+        "[emitir] id_factura=%s step=done elapsed_ms=%.1f",
+        id_factura,
+        (time.monotonic() - t0) * 1000,
+    )
+    return dto
 
 
 def cancelar_factura(

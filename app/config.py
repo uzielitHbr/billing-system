@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from botocore.config import Config
 from dotenv import load_dotenv
 
 DEFAULT_CORS_ORIGINS = (
@@ -98,3 +99,16 @@ class Settings:
         )
         settings.validate()
         return settings
+
+
+def get_boto3_config(
+    connect_timeout: int = 5,
+    read_timeout: int = 15,
+    max_attempts: int = 2,
+) -> Config:
+    """Return explicit botocore timeouts to prevent Gunicorn worker hangs."""
+    return Config(
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
+        retries={"max_attempts": max_attempts, "mode": "standard"},
+    )

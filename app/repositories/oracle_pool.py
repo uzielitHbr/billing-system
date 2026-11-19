@@ -51,7 +51,7 @@ def _extract_ora_code(exc: Exception) -> int | None:
 
 
 def translate_oracle_error(exc: Exception) -> Exception:
-    """Translate known ORA-20001, ORA-20002, and ORA-20004 errors to domain exceptions."""
+    """Translate known Oracle application/lock errors to domain exceptions."""
     ora_code = _extract_ora_code(exc)
     if ora_code == 20001:
         return InvoiceStateConflictError(
@@ -63,12 +63,20 @@ def translate_oracle_error(exc: Exception) -> Exception:
             "Solo se pueden cancelar facturas en estado TIMBRADA.",
             ora_code=20002,
         )
+    if ora_code in (20003, 54, 30006):
+        return InvoiceStateConflictError(
+            "La factura está siendo procesada por otra operación. Intenta nuevamente.",
+            ora_code=ora_code,
+        )
     if ora_code == 20004:
         return InvoiceNotFoundError(
             "Factura no encontrada.",
             ora_code=20004,
         )
     return exc
+
+
+DEFAULT_CALL_TIMEOUT_MS = 15000
 
 
 class OraclePoolManager:
@@ -100,8 +108,18 @@ class OraclePoolManager:
                 password=password,
                 dsn=dsn,
                 min=1,
-                max=5,
+                max=10,
                 increment=1,
+                getmode=oracledb.POOL_GETMODE_TIMEDWAIT,
+                wait_timeout=5000,
+                timeout=300,
+                max_lifetime_session=1800,
+                ping_interval=0,
+                ping_timeout=3000,
+                tcp_connect_timeout=5.0,
+                retry_count=2,
+                retry_delay=1,
+                expire_time=2,
             )
             return self._pool
 
@@ -133,11 +151,43 @@ def close_oracle_pool() -> None:
     _pool_manager.close()
 
 
+def _acquire_healthy_connection(pool: Any) -> Any:
+    """Acquire a verified connection from the pool, replacing dead RDS sockets."""
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            conn = pool.acquire()
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("Oracle pool.acquire() attempt %d failed: %s", attempt + 1, exc)
+            continue
+
+        is_healthy_fn = getattr(conn, "is_healthy", None)
+        if callable(is_healthy_fn) and is_healthy_fn() is False:
+            logger.warning("Discarding unhealthy Oracle connection on attempt %d", attempt + 1)
+            drop_fn = getattr(pool, "drop", None)
+            if callable(drop_fn):
+                drop_fn(conn)
+            else:
+                conn.close()
+            continue
+
+        try:
+            conn.call_timeout = DEFAULT_CALL_TIMEOUT_MS
+        except Exception:
+            pass
+        return conn
+
+    if last_exc is not None:
+        raise last_exc
+    return pool.acquire()
+
+
 @contextmanager
 def oracle_transaction(config: Mapping[str, Any] | None = None) -> Iterator[Any]:
     """Acquire a pooled Oracle connection with automatic commit or rollback."""
     pool = get_oracle_pool(config=config)
-    conn = pool.acquire()
+    conn = _acquire_healthy_connection(pool)
     try:
         yield conn
         conn.commit()
@@ -405,7 +455,7 @@ def check_oracle_connection(config: Mapping[str, Any] | None = None) -> bool:
     """Execute SELECT 1 FROM DUAL against the Oracle pool for /health."""
     try:
         pool = get_oracle_pool(config=config)
-        conn = pool.acquire()
+        conn = _acquire_healthy_connection(pool)
         try:
             with conn.cursor() as cursor:
                 cursor.execute("SELECT 1 FROM DUAL")

@@ -309,3 +309,115 @@ def test_catalogos_sat_servicios_pagination_search_and_404(app_client, rsa_keys)
         resp_404 = app_client.get("/servicios/SRV-999", headers=auth_headers)
         assert resp_404.status_code == 404
         assert resp_404.get_json()["error"] == "NOT_FOUND"
+
+
+def test_forgot_password_endpoint_flows(app_client):
+    # 1. Success -> 200 generic message
+    mock_idp = MagicMock()
+    mock_idp.forgot_password.return_value = {}
+    with patch("app.security.cognito_client.boto3.client", return_value=mock_idp):
+        resp_ok = app_client.post(
+            "/auth/forgot-password",
+            json={"email": "20243ds112@utez.edu.mx"},
+        )
+    assert resp_ok.status_code == 200
+    assert "Si el correo está registrado" in resp_ok.get_json()["mensaje"]
+    mock_idp.forgot_password.assert_called_once_with(
+        ClientId=CLIENT_ID,
+        Username="20243ds112@utez.edu.mx",
+    )
+
+    # 2. UserNotFoundException -> 200 generic message (no enumeration)
+    mock_idp_not_found = MagicMock()
+    mock_idp_not_found.forgot_password.side_effect = ClientError(
+        {"Error": {"Code": "UserNotFoundException", "Message": "User not found"}},
+        "ForgotPassword",
+    )
+    with patch("app.security.cognito_client.boto3.client", return_value=mock_idp_not_found):
+        resp_nf = app_client.post(
+            "/auth/forgot-password",
+            json={"email": "noexiste@utez.edu.mx"},
+        )
+    assert resp_nf.status_code == 200
+    assert resp_nf.get_json() == resp_ok.get_json()
+
+    # 3. LimitExceededException -> 429
+    mock_idp_limit = MagicMock()
+    mock_idp_limit.forgot_password.side_effect = ClientError(
+        {"Error": {"Code": "LimitExceededException", "Message": "Attempt limit exceeded"}},
+        "ForgotPassword",
+    )
+    with patch("app.security.cognito_client.boto3.client", return_value=mock_idp_limit):
+        resp_429 = app_client.post(
+            "/auth/forgot-password",
+            json={"email": "20243ds112@utez.edu.mx"},
+        )
+    assert resp_429.status_code == 429
+    assert resp_429.get_json()["error"] == "TOO_MANY_REQUESTS"
+
+    # 4. InvalidParameterException -> 400 clear unverified email message
+    mock_idp_invalid = MagicMock()
+    mock_idp_invalid.forgot_password.side_effect = ClientError(
+        {"Error": {"Code": "InvalidParameterException", "Message": "No verified email"}},
+        "ForgotPassword",
+    )
+    with patch("app.security.cognito_client.boto3.client", return_value=mock_idp_invalid):
+        resp_400 = app_client.post(
+            "/auth/forgot-password",
+            json={"email": "20243ds112@utez.edu.mx"},
+        )
+    assert resp_400.status_code == 400
+    assert "verificado" in resp_400.get_json()["mensaje"]
+
+    # 5. Invalid email format or extra field -> 400
+    resp_bad_email = app_client.post(
+        "/auth/forgot-password",
+        json={"email": "no-es-correo"},
+    )
+    assert resp_bad_email.status_code == 400
+
+
+def test_confirm_forgot_password_endpoint_flows(app_client):
+    payload = {
+        "email": "20243ds112@utez.edu.mx",
+        "code": "123456",
+        "newPassword": "NuevaPassword123!",
+    }
+
+    # 1. Success -> 200
+    mock_idp = MagicMock()
+    mock_idp.confirm_forgot_password.return_value = {}
+    with patch("app.security.cognito_client.boto3.client", return_value=mock_idp):
+        resp_ok = app_client.post("/auth/confirm-forgot-password", json=payload)
+    assert resp_ok.status_code == 200
+    assert "actualizada correctamente" in resp_ok.get_json()["mensaje"]
+    mock_idp.confirm_forgot_password.assert_called_once_with(
+        ClientId=CLIENT_ID,
+        Username="20243ds112@utez.edu.mx",
+        ConfirmationCode="123456",
+        Password="NuevaPassword123!",
+    )
+
+    # 2. Mapped Cognito errors -> 400 in Spanish
+    cases = [
+        ("CodeMismatchException", "incorrecto"),
+        ("ExpiredCodeException", "expirado"),
+        ("InvalidPasswordException", "política de seguridad"),
+    ]
+    for code_name, expected_fragment in cases:
+        mock_err = MagicMock()
+        mock_err.confirm_forgot_password.side_effect = ClientError(
+            {"Error": {"Code": code_name, "Message": "Cognito msg"}},
+            "ConfirmForgotPassword",
+        )
+        with patch("app.security.cognito_client.boto3.client", return_value=mock_err):
+            resp_err = app_client.post("/auth/confirm-forgot-password", json=payload)
+        assert resp_err.status_code == 400
+        assert expected_fragment in resp_err.get_json()["mensaje"]
+
+    # 3. Extra field -> 400
+    resp_extra = app_client.post(
+        "/auth/confirm-forgot-password",
+        json={**payload, "role": "ADMIN_ACADEMICO"},
+    )
+    assert resp_extra.status_code == 400

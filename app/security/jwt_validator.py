@@ -56,7 +56,12 @@ def get_jwk_client(region: str, user_pool_id: str) -> PyJWKClient:
     with _jwk_lock:
         client = _jwk_clients.get(jwks_url)
         if client is None:
-            client = PyJWKClient(jwks_url, cache_keys=True, lifespan=3600)
+            client = PyJWKClient(
+                jwks_url,
+                cache_keys=True,
+                lifespan=3600,
+                timeout=5,
+            )
             _jwk_clients[jwks_url] = client
         return client
 
